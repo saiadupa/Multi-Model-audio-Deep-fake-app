@@ -1,0 +1,9 @@
+numpy
+pandas
+torch>=1.6.0
+soundfile
+pydub
+tqdm
+whisper
+librosa
+pyaml
