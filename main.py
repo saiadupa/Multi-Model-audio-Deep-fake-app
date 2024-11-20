@@ -8,9 +8,9 @@ import librosa.display
 import numpy as np
 import requests
 import yt_dlp as youtube_dl
-from moviepy.editor import VideoFileClip
-from asd_models import ASD, ASD_GMM 
+from asd_models import ASD, ASD_GMM
 from preprocessing import preprocess_audio
+from pydub import AudioSegment
 
 def download_file(url, output_path):
     response = requests.get(url, stream=True)
@@ -40,16 +40,18 @@ def download_from_url(url, output_path):
             result = ydl.download([url])
             return os.path.join(output_path, 'downloaded_audio.wav')
         except Exception as e:
-            st.error("Error downloading audio from URL. Contact Nithin to solve the error or retry it!")
+            st.error(f"Error downloading audio from URL. {str(e)}")
             return None
+
+import ffmpeg
 
 def extract_audio_from_video(video_file, output_audio_path):
     try:
-        with VideoFileClip(video_file) as video:
-            audio = video.audio
-            audio.write_audiofile(output_audio_path)
-    except Exception as e:
-        st.error("Error extracting audio from video. Contact Nithin to solve the error or retry it!")
+        # Run ffmpeg command to extract audio
+        ffmpeg.input(video_file).output(output_audio_path).run(quiet=True)
+        return output_audio_path
+    except ffmpeg.Error as e:
+        st.error(f"FFmpeg error in extracting audio from video: {e.stderr.decode('utf8')}")
         return None
 
 def sigmoid(x):
@@ -70,8 +72,12 @@ def upload(data_file, model_selection):
 
     file_path = os.path.join(data_dir, filename)
 
-    with open(file_path, 'wb') as f:
-        f.write(data_file.getbuffer())
+    try:
+        with open(file_path, 'wb') as f:
+            f.write(data_file.getbuffer())
+    except Exception as e:
+        st.error(f"Error saving uploaded file: {str(e)}")
+        return
 
     st.success(f"File {filename} saved successfully!")
 
@@ -79,12 +85,50 @@ def upload(data_file, model_selection):
 
     if data_file.type.split('/')[0] == 'video':
         audio_file = os.path.join(data_dir, f"{speaker_name}.wav")
-        if extract_audio_from_video(file_path, audio_file) is None:
+        audio_file = extract_audio_from_video(file_path, audio_file)
+        if audio_file is None:
             return
 
     process_audio_file(audio_file, speaker_name, model_selection)
 
+def convert_to_wav(audio_file):
+    try:
+        audio = AudioSegment.from_file(audio_file)
+        wav_file = audio_file.replace(os.path.splitext(audio_file)[1], ".wav")
+        audio.export(wav_file, format="wav")
+        return wav_file
+    except Exception as e:
+        st.error(f"Error converting audio file to WAV format. {str(e)}")
+        return None
+
+def plot_audio_classification(audio_path, intervals, sr=None):
+    audio, sr = librosa.load(audio_path, sr=sr)
+    time = np.linspace(0, len(audio) / sr, len(audio))
+    
+    plt.figure(figsize=(10, 5))
+    
+    for label, start, end in intervals:
+        start_sample, end_sample = int(start * sr), int(end * sr)
+        if label == 'real':
+            color = 'green'
+        else:
+            color = 'red'
+        plt.plot(time[start_sample:end_sample], audio[start_sample:end_sample], color=color)
+    
+    plt.xlabel("Time (seconds)")
+    plt.ylabel("Amplitude")
+    plt.title("Audio Classification: Real vs Deepfake")
+    plt.legend(["Deepfake", "Real"], loc="lower left")
+    plt.tight_layout()
+    st.pyplot(plt)
+    plt.close()
+
 def process_audio_file(audio_file, speaker_name, model_selection):
+    if not audio_file.endswith('.wav'):
+        audio_file = convert_to_wav(audio_file)
+        if audio_file is None:
+            return
+
     try:
         y, sr = librosa.load(audio_file, sr=None)
         fig, ax = plt.subplots()
@@ -95,17 +139,18 @@ def process_audio_file(audio_file, speaker_name, model_selection):
         fig.colorbar(img, ax=ax, format="%+2.0f dB")
         st.pyplot(fig)
     except Exception as e:
-        st.error("Error processing audio file. Contact Nithin to solve the error or retry it!")
+        st.error(f"Error processing audio file. {str(e)}")
         return
 
     chunk_dir = f'chunks_{speaker_name}'
     try:
         audio_chunks_dict = preprocess_audio(audio_file, speaker_name=speaker_name, save_chunks=True, out_dir=chunk_dir)
     except Exception as e:
-        st.error("Error preprocessing audio. Contact Nithin to solve the error or retry it!")
+        st.error(f"Error preprocessing audio. {str(e)}")
         return
 
     model_scores = {}
+    labeled_intervals = []
 
     try:
         for model_type in model_selection:
@@ -115,17 +160,23 @@ def process_audio_file(audio_file, speaker_name, model_selection):
             elif model_type in ['cqcc', 'lfcc']:
                 gmm_model = ASD_GMM(features=model_type, generate_score_file=True)
                 score_df = gmm_model.produce_evaluation(audio_chunks_dict, speaker_name=speaker_name)
-
+                
             def evaluate_scores(score_df):
-                if score_df is None or 'cm-score' not in score_df.columns:
+                if 'start_time' not in score_df.columns:
+                    score_df['start_time'] = score_df.index * 2.5  
+                if 'end_time' not in score_df.columns:
+                    score_df['end_time'] = score_df['start_time'] + 2.5 
+                
+                if 'cm-score' not in score_df.columns:
                     return score_df
                 score_df['result'] = score_df['cm-score'].apply(lambda x: 'real' if x >= 0 else 'deepfake')
                 return score_df
 
             score_df = evaluate_scores(score_df)
             model_scores[model_type] = score_df
+
     except Exception as e:
-        st.error("Error evaluating models. Contact Nithin to solve the error or retry it!")
+        st.error(f"Error evaluating models. {str(e)}")
         return
 
     try:
@@ -135,27 +186,36 @@ def process_audio_file(audio_file, speaker_name, model_selection):
                 st.write(f"{model_type.upper()} Results:")
                 st.dataframe(model_scores[model_type])
 
-        avg_scores = pd.concat([model_scores[model]['cm-score'] for model in model_selection], axis=1).mean(axis=1)
+        if model_selection:
+            avg_scores = pd.concat([model_scores[model]['cm-score'] for model in model_selection], axis=1).mean(axis=1)
 
-        main_output_df = pd.DataFrame({
-            'filename': model_scores[model_selection[0]]['filename'],
-            'average_cm-score': avg_scores,
-            'result': avg_scores.apply(lambda x: 'real' if x >= 0 else 'deepfake')
-        })
+            main_output_df = pd.DataFrame({
+                'filename': model_scores[model_selection[0]]['filename'],
+                'average_cm-score': avg_scores,
+                'start_time': model_scores[model_selection[0]]['start_time'],
+                'end_time': model_scores[model_selection[0]]['end_time'],
+                'result': avg_scores.apply(lambda x: 'real' if x >= 0 else 'deepfake')
+            })
 
-        st.write("Main Output (Average of All Selected Models):")
-        st.dataframe(main_output_df)
+            st.write("Main Output (Average of All Selected Models):")
+            st.dataframe(main_output_df)
 
-        avg_score_mean = main_output_df['average_cm-score'].mean()
-        final_result = 'real' if avg_score_mean >= 0 else 'deepfake'
-        avg_confidence = sigmoid(avg_score_mean) * 100
+            labeled_intervals = [(row['result'], row['start_time'], row['end_time']) for index, row in main_output_df.iterrows()]
 
-        if final_result == 'real':
-            st.markdown(f"<p style='color:green;'>The audio file is classified as '{final_result.capitalize()}' with {avg_confidence:.2f}% confidence.</p>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<p style='color:red;'>The audio file is classified as '{final_result.capitalize()}' with {avg_confidence:.2f}% confidence.</p>", unsafe_allow_html=True)
+            avg_score_mean = main_output_df['average_cm-score'].mean()
+            final_result = 'real' if avg_score_mean >= 0 else 'deepfake'
+            avg_confidence = sigmoid(avg_score_mean) * 100
+
+            if final_result == 'real':
+                st.markdown(f"<p style='color:green;'>The audio file is classified as '{final_result.capitalize()}' with {avg_confidence:.2f}% confidence.</p>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<p style='color:red;'>The audio file is classified as '{final_result.capitalize()}' with {avg_confidence:.2f}% confidence.</p>", unsafe_allow_html=True)
+    
+        if labeled_intervals:
+            plot_audio_classification(audio_file, labeled_intervals)
+    
     except Exception as e:
-        st.error("Error displaying results. Contact Nithin to solve the error or retry it!")
+        st.error(f"Error displaying results. {str(e)}")
         return
 
 def main():
@@ -186,7 +246,10 @@ def main():
     url = st.text_input('Enter the URL of an audio or video file:')
 
     if data_file is not None:
-        st.audio(data_file, format=f'audio/{data_file.type.split("/")[-1]}')
+        if 'video' in data_file.type:
+            st.video(data_file)
+        else:
+            st.audio(data_file, format=f'audio/{data_file.type.split("/")[-1]}')
         upload(data_file, model_selection)
     elif url:
         filename = sanitize_filename(os.path.basename(url))

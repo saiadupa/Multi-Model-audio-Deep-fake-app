@@ -86,7 +86,7 @@ class ASD:
         fname_list = []
         score_list = []
         for utt_id, audio_data in tqdm(data_dict.items()):
-            X_pad = pad(audio_data, 64600)
+            X_pad = pad(audio_data, 192000)  # Adjusted pad length to 192000
             x_inp = Tensor(X_pad)
             x_inp = x_inp.unsqueeze(0).float().to(self.device)
 
@@ -119,7 +119,7 @@ def get_model(model_config: Dict, device: str) -> nn.Module:
     print("no. model params:{}".format(nb_params))
     return model
 
-def pad(x: np.ndarray, max_len=64600) -> np.ndarray:
+def pad(x: np.ndarray, max_len=192000) -> np.ndarray:
     x_len = x.shape[0]
     if x_len >= max_len:
         return x[:max_len]
