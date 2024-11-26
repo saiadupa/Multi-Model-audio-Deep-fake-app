@@ -113,12 +113,15 @@ def plot_audio_classification(audio_path, intervals, sr=None):
             color = 'green'
         else:
             color = 'red'
-        plt.plot(time[start_sample:end_sample], audio[start_sample:end_sample], color=color)
-    
+        plt.plot(time[start_sample:end_sample], audio[start_sample:end_sample], color=color, label=label)
+
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+
     plt.xlabel("Time (seconds)")
     plt.ylabel("Amplitude")
     plt.title("Audio Classification: Real vs Deepfake")
-    plt.legend(["Deepfake", "Real"], loc="lower left")
     plt.tight_layout()
     st.pyplot(plt)
     plt.close()
@@ -160,13 +163,13 @@ def process_audio_file(audio_file, speaker_name, model_selection):
             elif model_type in ['cqcc', 'lfcc']:
                 gmm_model = ASD_GMM(features=model_type, generate_score_file=True)
                 score_df = gmm_model.produce_evaluation(audio_chunks_dict, speaker_name=speaker_name)
-                
+
             def evaluate_scores(score_df):
                 if 'start_time' not in score_df.columns:
-                    score_df['start_time'] = score_df.index * 2.5  
+                    score_df['start_time'] = score_df.index * 12  
                 if 'end_time' not in score_df.columns:
-                    score_df['end_time'] = score_df['start_time'] + 2.5 
-                
+                    score_df['end_time'] = score_df['start_time'] + 12 
+
                 if 'cm-score' not in score_df.columns:
                     return score_df
                 score_df['result'] = score_df['cm-score'].apply(lambda x: 'real' if x >= 0 else 'deepfake')
@@ -202,11 +205,21 @@ def process_audio_file(audio_file, speaker_name, model_selection):
 
             labeled_intervals = [(row['result'], row['start_time'], row['end_time']) for index, row in main_output_df.iterrows()]
 
+            # Calculate the mean of the average cm-scores
             avg_score_mean = main_output_df['average_cm-score'].mean()
+            # Determine the final result based on the mean score
             final_result = 'real' if avg_score_mean >= 0 else 'deepfake'
-            avg_confidence = sigmoid(avg_score_mean) * 100
+            # Calculate confidence using the sigmoid function
+            avg_confidence = sigmoid(np.abs(avg_score_mean)) * 100
 
-            if final_result == 'real':
+            st.write(f"The mean cm-score: {avg_score_mean:.2f}, Confidence: {avg_confidence:.2f}%")
+
+            if avg_confidence < 20:
+                if final_result == 'real':
+                    st.markdown("<p style='color:orange;'>The audio might be fake because it has very low confidence to classify, some part of the audio might have real audio.</p>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<p style='color:orange;'>The audio might be real because it has very low confidence to classify, some part of the audio might have deepfake.</p>", unsafe_allow_html=True)
+            elif final_result == 'real':
                 st.markdown(f"<p style='color:green;'>The audio file is classified as '{final_result.capitalize()}' with {avg_confidence:.2f}% confidence.</p>", unsafe_allow_html=True)
             else:
                 st.markdown(f"<p style='color:red;'>The audio file is classified as '{final_result.capitalize()}' with {avg_confidence:.2f}% confidence.</p>", unsafe_allow_html=True)
